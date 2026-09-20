@@ -128,6 +128,8 @@ class SubjectiveSshDataSource(SubjectiveDataSource):
             minimum=0,
         )
         self.configured_ssh_path = str(connection.get("ssh_path") or "").strip()
+        # Only meaningful for a terminal session; see open_pty.
+        self.term = str(connection.get("term") or "").strip()
 
         self.session_id = str(connection.get("session_id") or "") or None
         # Working directory as of the last turn, so `cd` carries forward. Seeded from
@@ -284,6 +286,16 @@ class SubjectiveSshDataSource(SubjectiveDataSource):
                 "label": "Command Timeout (s)",
                 "required": False,
                 "default": cls.DEFAULT_COMMAND_TIMEOUT,
+            },
+            "term": {
+                "type": "text",
+                "label": "Terminal Type",
+                "required": False,
+                "placeholder": "xterm-256color",
+                "description": (
+                    "TERM for interactive terminal sessions. Blank uses "
+                    "xterm-256color; ignored by the command-at-a-time paths."
+                ),
             },
             "ssh_path": {
                 "type": "file_path",
@@ -631,13 +643,17 @@ class SubjectiveSshDataSource(SubjectiveDataSource):
             f"{command}\n"
         )
 
-    def _ssh_options(self, materials: dict, *, multiplex: bool = True) -> list[str]:
+    def _ssh_options(
+        self, materials: dict, *, multiplex: bool = True, pty: bool = False
+    ) -> list[str]:
         options = [
             f"ConnectTimeout={self.connect_timeout}",
             "ServerAliveInterval=15",
             "ServerAliveCountMax=3",
-            # Nothing here is interactive; never let ssh try to allocate a tty.
-            "RequestTTY=no",
+            # `force` is the option form of -tt: ask for a remote pty even though
+            # ssh's own stdin is a pty we created rather than a real terminal.
+            # Otherwise nothing is interactive here and a tty is only a liability.
+            "RequestTTY=force" if pty else "RequestTTY=no",
             f"StrictHostKeyChecking={'yes' if self.strict_host_key_checking else 'no'}",
         ]
         if self.username:
@@ -878,6 +894,77 @@ class SubjectiveSshDataSource(SubjectiveDataSource):
             shell=self.shell,
             on_event=on_event,
         )
+
+    def open_pty(
+        self,
+        *,
+        cols: int = 0,
+        rows: int = 0,
+        term: str = "",
+        on_event: Callable[[dict], None] | None = None,
+    ):
+        """Open an interactive terminal on the remote host.
+
+        The third shape, after `run()` (one command, one result) and `open_shell()`
+        (a stream of framed commands). Here the remote gets a real tty, so `claude`
+        and `codex` with no arguments, `top`, `vim` and `sudo` prompts all work — and
+        in exchange there are no exit codes, no `cwd` and no stream separation,
+        because a terminal has no command boundary to report. See ssh_pty.
+
+        Raises LookupError when ssh is missing or the connection is incomplete, and
+        ValueError when a pinned host key does not match.
+        """
+        from ssh_pty import (
+            DEFAULT_COLS,
+            DEFAULT_ROWS,
+            DEFAULT_TERM,
+            SshPtySession,
+            remote_login_argv,
+        )
+
+        if not self._find_ssh():
+            raise LookupError(
+                "The ssh client was not found. Install OpenSSH or configure ssh_path."
+            )
+        missing = self._missing_configuration()
+        if missing:
+            raise LookupError("Incomplete connection: " + ", ".join(missing) + ".")
+        pinned = self._verify_pinned_fingerprint()
+        if pinned is not None:
+            raise ValueError(pinned["error"])
+
+        materials, release = self._open_materials()
+        try:
+            argv = self._build_pty_argv(materials)
+        except Exception:
+            release()
+            raise
+        argv += remote_login_argv(self.cwd, self.shell)
+        BBLogger.log(
+            f"[SubjectiveSshDataSource] Opening pty session host={self.host}:{self.port}"
+        )
+        return SshPtySession(
+            argv,
+            self._build_environment(materials),
+            release=release,
+            cols=cols or DEFAULT_COLS,
+            rows=rows or DEFAULT_ROWS,
+            term=term or self.term or DEFAULT_TERM,
+            on_event=on_event,
+        )
+
+    def _build_pty_argv(self, materials: dict) -> list[str]:
+        """ssh argv for a terminal session, without the trailing remote command."""
+        ssh_path = self._find_ssh() or "ssh"
+        argv = [ssh_path, *self._port_argv()]
+        for option in self._ssh_options(materials, multiplex=False, pty=True):
+            argv += ["-o", option]
+        if materials.get("identity_file"):
+            argv += ["-i", materials["identity_file"]]
+        elif self.auth_method == self.AUTH_KEY_PATH and self.private_key_path:
+            argv += ["-i", os.path.expanduser(self.private_key_path)]
+        argv.append(self._target())
+        return argv
 
     def _build_shell_argv(self, materials: dict) -> list[str]:
         """ssh argv for a session, without the trailing remote command."""
