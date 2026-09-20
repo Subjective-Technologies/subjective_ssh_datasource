@@ -1,0 +1,15 @@
+[project]
+name = "subjective_ssh_datasource"
+version = "0.1.0"
+description = "Subjective data source plugin: shell over SSH."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "subjective-abstract-data-source-package @ git+https://github.com/Subjective-Technologies/subjective-abstract-data-source-package.git",
+  "brainboost-data-source-logger-package @ git+https://github.com/Subjective-Technologies/brainboost_data_source_logger_package.git",
+  "brainboost-configuration-package @ git+https://github.com/Subjective-Technologies/brainboost_configuration_package.git",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

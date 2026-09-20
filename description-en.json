@@ -1,0 +1,76 @@
+{
+  "description": "Chat with any machine over SSH: prompts run as commands on the remote host, with multiplexed sessions, a working directory that survives between turns, and pinned host-key verification.",
+  "domainCategory": "Infrastructure & Operations",
+  "subjectiveTechnologyElement": "DataSources",
+  "publisher": "BrainBoost Ltd.",
+  "publisher_website": "https://subjectivetechnologies.com",
+  "publisher_email": "plugins@subjectivetechnologies.com",
+  "disclaimer": "This VirtualGlass extension is not associated with, endorsed by, or approved by the OpenSSH project. It may use the OpenSSH client for convenience and is provided free to use. A configured connection grants shell access to the host it names. BrainBoost Ltd. is not responsible for any damages, losses, or issues resulting from its use.",
+  "sections": [
+    {
+      "type": "splitList",
+      "title": "SSH",
+      "text": "Turn a chat into a shell on any reachable machine, using the OpenSSH client already installed on the host.",
+      "image": {
+        "src": "/subjective_ssh_datasource/icon.svg",
+        "alt": "SSH icon"
+      },
+      "list": [
+        "Connection type: ON_DEMAND",
+        "Config fields: host, port, username, authentication (agent, key path, pasted key, or password), key passphrase, known hosts, pinned host key fingerprint, working directory, shell, session persistence, and timeouts",
+        "Output: Response text, stdout, stderr, exit code, working directory, session ID, host, and status."
+      ]
+    },
+    {
+      "type": "example",
+      "title": "Typical workflow",
+      "intro": "Configure the host and credentials, then run commands on it as part of a BrainBoost pipeline.",
+      "cards": [
+        {
+          "title": "Connect",
+          "text": "Name the host, port and remote account. Reuse the running ssh-agent by default, or supply a key or password. Pin the host key fingerprint to refuse any other key."
+        },
+        {
+          "title": "Fetch",
+          "text": "Send a command as a chat message. The first turn opens a multiplexed connection; later turns reuse it, and cd carries forward between them."
+        },
+        {
+          "title": "Consume",
+          "text": "Consume stdout, stderr, exit code and working directory from the chat UI or downstream automation."
+        }
+      ]
+    },
+    {
+      "type": "faq",
+      "title": "FAQ",
+      "items": [
+        {
+          "q": "What do I need to configure?",
+          "a": "A reachable host, a remote username, and a way to authenticate. With the default agent method, no secret is stored in Subjective at all. OpenSSH 8.4 or newer must be installed on the machine running the datasource."
+        },
+        {
+          "q": "How are credentials handled?",
+          "a": "A password or key passphrase is written to a private file read by a generated askpass helper and removed when the turn ends. Secrets never appear in command lines, logs, transcripts, or results."
+        },
+        {
+          "q": "What does it output?",
+          "a": "Returns response text, stdout, stderr, exit code, the resulting working directory, the session ID, and a status such as completed, command_failed, authentication_required, or host_key_mismatch."
+        },
+        {
+          "q": "Where does the data go?",
+          "a": "Outputs are emitted to downstream subscribers in the BrainBoost pipeline. Some datasources also write artifacts (context files, catalogs, or exports) locally based on your configuration."
+        }
+      ]
+    },
+    {
+      "type": "finalCta",
+      "title": "Ready to use SSH?",
+      "text": "Add it to your BrainBoost pipeline and start ingesting.",
+      "primaryCta": {
+        "label": "Get Subjective Client",
+        "href": "/subjective-client-download"
+      },
+      "subtext": "Run this datasource locally with your own credentials and storage."
+    }
+  ]
+}
