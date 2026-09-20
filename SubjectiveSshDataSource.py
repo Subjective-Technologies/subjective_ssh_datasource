@@ -41,7 +41,7 @@ import subprocess
 import tempfile
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from brainboost_data_source_logger_package.BBLogger import BBLogger
 from subjective_abstract_data_source_package import SubjectiveDataSource
@@ -85,6 +85,9 @@ class SubjectiveSshDataSource(SubjectiveDataSource):
 
         self.host = str(connection.get("host") or "").strip()
         self.port = self._coerce_int(connection.get("port"), 22, minimum=1)
+        # Whether to pass -p at all. `host` may be an alias whose ~/.ssh/config entry
+        # sets Port; passing a defaulted -p 22 would silently override it.
+        self._port_explicit = bool(str(connection.get("port") or "").strip())
         self.username = str(connection.get("username") or "").strip()
 
         auth_method = str(connection.get("auth_method") or self.AUTH_AGENT).strip()
@@ -143,7 +146,10 @@ class SubjectiveSshDataSource(SubjectiveDataSource):
                 "label": "Host",
                 "required": True,
                 "placeholder": "server.example.com",
-                "description": "Hostname or IP address of the machine to connect to.",
+                "description": (
+                    "Hostname, IP address, or a Host alias from ~/.ssh/config "
+                    "(which then supplies the account, port and key)."
+                ),
             },
             "port": {
                 "type": "number",
@@ -154,9 +160,12 @@ class SubjectiveSshDataSource(SubjectiveDataSource):
             "username": {
                 "type": "text",
                 "label": "Username",
-                "required": True,
+                "required": False,
                 "placeholder": "deploy",
-                "description": "Remote account the commands run as.",
+                "description": (
+                    "Remote account the commands run as. Leave blank to let "
+                    "~/.ssh/config decide, as the ssh command would."
+                ),
             },
             "auth_method": {
                 "type": "select",
@@ -569,7 +578,7 @@ class SubjectiveSshDataSource(SubjectiveDataSource):
 
     def _build_argv(self, command: str, materials: dict) -> list[str]:
         ssh_path = self._find_ssh() or "ssh"
-        argv = [ssh_path, "-p", str(self.port)]
+        argv = [ssh_path, *self._port_argv()]
         for option in self._ssh_options(materials):
             argv += ["-o", option]
         if materials.get("identity_file"):
@@ -622,7 +631,7 @@ class SubjectiveSshDataSource(SubjectiveDataSource):
             f"{command}\n"
         )
 
-    def _ssh_options(self, materials: dict) -> list[str]:
+    def _ssh_options(self, materials: dict, *, multiplex: bool = True) -> list[str]:
         options = [
             f"ConnectTimeout={self.connect_timeout}",
             "ServerAliveInterval=15",
@@ -657,7 +666,9 @@ class SubjectiveSshDataSource(SubjectiveDataSource):
         if self.auth_method in (self.AUTH_KEY_PATH, self.AUTH_KEY_CONTENT):
             options.append("IdentitiesOnly=yes")
 
-        if self.persistent_session and self.session_id:
+        # A shell session holds its own connection for its whole life, so a
+        # ControlMaster would only leave a socket behind outliving it.
+        if multiplex and self.persistent_session and self.session_id:
             options.append("ControlMaster=auto")
             options.append(f"ControlPath={self._control_path()}")
             options.append(f"ControlPersist={self.persist_seconds}")
@@ -733,6 +744,17 @@ class SubjectiveSshDataSource(SubjectiveDataSource):
 
     def _askpass_materials(self) -> "SubjectiveSshDataSource._Materials":
         return self._Materials(self)
+
+    def _open_materials(self) -> tuple[dict, Callable[[], None]]:
+        """Secret files for something longer than one command, with its own release.
+
+        A terminal session outlives any single command and ssh may re-authenticate on
+        a dropped connection, so the files cannot be torn down when the first command
+        returns. The caller owns the returned release and must call it.
+        """
+        manager = self._askpass_materials()
+        materials = manager.__enter__()
+        return materials, lambda: manager.__exit__(None, None, None)
 
     def _prompt_secret(self) -> str:
         """The secret ssh will prompt for, if any."""
@@ -813,6 +835,63 @@ class SubjectiveSshDataSource(SubjectiveDataSource):
 
     # ------------------------------------------------------------------ sessions
 
+    def open_shell(self, *, on_event: Callable[[dict], None] | None = None):
+        """Open a long-lived remote shell for a terminal session.
+
+        The one-shot `run()` path answers a pipeline turn: one command, one result.
+        This is the interactive path behind the WebSocket terminal — one shell that
+        survives many commands, so `cd`, `export` and an activated virtualenv persist,
+        and output streams out as it is produced instead of arriving all at once.
+
+        Raises LookupError when ssh is missing or the connection is incomplete, and
+        ValueError when a pinned host key does not match. Both are refusals to
+        connect, and both must reach the operator before a socket is opened.
+        """
+        from ssh_shell import SshShellSession, remote_shell_argv
+
+        if not self._find_ssh():
+            raise LookupError(
+                "The ssh client was not found. Install OpenSSH or configure ssh_path."
+            )
+        missing = self._missing_configuration()
+        if missing:
+            raise LookupError("Incomplete connection: " + ", ".join(missing) + ".")
+        pinned = self._verify_pinned_fingerprint()
+        if pinned is not None:
+            raise ValueError(pinned["error"])
+
+        materials, release = self._open_materials()
+        try:
+            argv = self._build_shell_argv(materials)
+            environment = self._build_environment(materials)
+        except Exception:
+            release()
+            raise
+        argv.append(shlex.join(remote_shell_argv(self.shell, self.login_shell)))
+        BBLogger.log(
+            f"[SubjectiveSshDataSource] Opening shell session host={self.host}:{self.port}"
+        )
+        return SshShellSession(
+            argv,
+            environment,
+            release=release,
+            shell=self.shell,
+            on_event=on_event,
+        )
+
+    def _build_shell_argv(self, materials: dict) -> list[str]:
+        """ssh argv for a session, without the trailing remote command."""
+        ssh_path = self._find_ssh() or "ssh"
+        argv = [ssh_path, *self._port_argv()]
+        for option in self._ssh_options(materials, multiplex=False):
+            argv += ["-o", option]
+        if materials.get("identity_file"):
+            argv += ["-i", materials["identity_file"]]
+        elif self.auth_method == self.AUTH_KEY_PATH and self.private_key_path:
+            argv += ["-i", os.path.expanduser(self.private_key_path)]
+        argv.append(self._target())
+        return argv
+
     def _control_path(self) -> str:
         """Socket for the multiplexed session.
 
@@ -856,12 +935,20 @@ class SubjectiveSshDataSource(SubjectiveDataSource):
     def _target(self) -> str:
         return f"{self.username}@{self.host}" if self.username else self.host
 
+    def _port_argv(self) -> list[str]:
+        return ["-p", str(self.port)] if self._port_explicit else []
+
     def _missing_configuration(self) -> list[str]:
+        """Fields without which a connection cannot be attempted at all.
+
+        `username` is deliberately not one of them: `host` may be an alias in the
+        operator's ~/.ssh/config, which is where the account, port, key and options
+        for it are already written. Requiring a username here would reject the
+        shortest and most common way to name a machine.
+        """
         missing = []
         if not self.host:
             missing.append("host")
-        if not self.username:
-            missing.append("username")
         if self.auth_method == self.AUTH_PASSWORD and not self._password:
             missing.append("password")
         if self.auth_method == self.AUTH_KEY_PATH:

@@ -66,6 +66,42 @@ A non-zero exit is a *result*, not a datasource failure: `status` is `command_fa
 sentinel means the command never ran (auth, host key, DNS, refused) and is classified
 from ssh's stderr instead.
 
+## Two shapes: a turn, and a session
+
+`run()` answers a pipeline turn — one command, one result, connection reused through
+OpenSSH multiplexing. `open_shell()` is the other shape, behind the service's
+`/ws/ssh` WebSocket terminal: `ssh … bash -s` with stdin held open, so one shell lives
+for the whole session.
+
+```python
+session = SubjectiveSshDataSource(connection={"host": "subjective-agents"}).open_shell()
+session.start()                       # {"type": "ready", "cwd": "/home/worktwins"}
+session.send_command("cd /tmp && export MARK=set")
+session.send_command("pwd; echo $MARK")   # -> /tmp\nset
+session.close()
+```
+
+Shell state genuinely persists — variables, functions, `cd`, `export`, an activated
+virtualenv — because it is the same shell, not a new one per command. Output streams
+out as the remote writes it rather than arriving when the command ends.
+
+A command's end is marked on **both** streams: the shell prints a sentinel carrying
+the exit code and `pwd` to stdout and a matching one to stderr, and the command is
+reported finished only once both have landed. stdout and stderr are separate pipes
+with no ordering guarantee, so without the stderr marker a command's late diagnostics
+would be attributed to the next command. This is framing, not a trust boundary — a
+command that writes the marker to both streams can forge a boundary, and anyone
+running commands here already runs arbitrary code.
+
+Each command's stdin is `/dev/null`, which is what stops `cat` from eating the
+sentinel and wedging the session.
+
+**Not a terminal emulator.** There is no pty, so `top`, `vim` and a `sudo` password
+prompt will not work — the remote side sees a pipe. `interrupt()` tears the
+connection down rather than delivering SIGINT to the remote job, for the same reason.
+A pty mode needs a local pty pair and `ssh -tt`, and turns the output into a byte
+stream the client must render with a terminal emulator.
+
 ## Connection fields
 
 `host`, `port`, `username`, `auth_method` (`agent` | `private_key_path` |
@@ -74,6 +110,16 @@ from ssh's stderr instead.
 `strict_host_key_checking`, `working_directory`, `shell`, `login_shell`,
 `persistent_session`, `persist_seconds`, `connect_timeout`, `command_timeout`,
 `ssh_path`.
+
+`host` may be a `Host` alias from `~/.ssh/config`, which is then where the account,
+port, key and options come from — so `{"host": "subjective-agents"}` is a complete
+connection and no secret passes through this package at all. `username` is optional
+for that reason, and `port` is only passed to ssh when it is set explicitly, so a
+defaulted 22 cannot override a `Port` in the config.
+
+Pinning `host_key_fingerprint` does not work with an alias: `ssh-keyscan` does not
+read `ssh_config`, so the pin is checked against the alias name as a hostname. Use an
+explicit host when pinning.
 
 ## Requirements
 
