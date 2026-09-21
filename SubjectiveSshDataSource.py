@@ -1010,6 +1010,15 @@ class SubjectiveSshDataSource(SubjectiveDataSource):
         argv.append(self._target())
         return argv
 
+    def _control_dir(self) -> str:
+        """Private directory for multiplexing sockets. Shared with SshCommandRunner,
+        which opens one socket for a whole agent turn rather than per command."""
+        base = Path(
+            os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
+        ) / f"subjective-ssh-{os.getuid()}"
+        base.mkdir(mode=stat.S_IRWXU, parents=True, exist_ok=True)
+        return str(base)
+
     def _control_path(self) -> str:
         """Socket for the multiplexed session.
 
@@ -1020,11 +1029,7 @@ class SubjectiveSshDataSource(SubjectiveDataSource):
         digest = hashlib.sha256(
             f"{self.username}@{self.host}:{self.port}/{self.session_id}".encode()
         ).hexdigest()[:16]
-        base = Path(
-            os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
-        ) / f"subjective-ssh-{os.getuid()}"
-        base.mkdir(mode=stat.S_IRWXU, parents=True, exist_ok=True)
-        return str(base / f"{digest}.sock")
+        return str(Path(self._control_dir()) / f"{digest}.sock")
 
     def _close_master(self) -> None:
         if not (self.persistent_session and self.session_id):
