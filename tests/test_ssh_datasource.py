@@ -154,12 +154,38 @@ class CommandConstructionTests(SshTestCase):
         self.assertIn("BatchMode=no", options)
         self.assertIn("PubkeyAuthentication=no", options)
 
-    def test_host_key_checking_is_strict_by_default(self):
-        self.assertIn("StrictHostKeyChecking=yes", self.datasource()._ssh_options({}))
+    def test_an_unknown_host_key_is_trusted_once_and_pinned_by_default(self):
+        """`yes` cannot reach a machine this account has never met, and refusing every
+        first connection makes the feature unusable; `accept-new` still refuses a
+        *changed* key, which is the case that actually indicates an attack."""
+        self.assertIn("StrictHostKeyChecking=accept-new", self.datasource()._ssh_options({}))
 
-    def test_host_key_checking_can_be_disabled_explicitly(self):
-        source = self.datasource(strict_host_key_checking=False)
-        self.assertIn("StrictHostKeyChecking=no", source._ssh_options({}))
+    def test_strict_can_be_asked_for(self):
+        source = self.datasource(host_key_policy="strict")
+        self.assertIn("StrictHostKeyChecking=yes", source._ssh_options({}))
+
+    def test_checking_can_be_turned_off_entirely(self):
+        source = self.datasource(host_key_policy="off")
+        options = source._ssh_options({})
+        self.assertIn("StrictHostKeyChecking=no", options)
+        # Nothing was verified, so nothing is recorded: writing an unchecked key
+        # would make the next connection look verified when it is not.
+        self.assertIn("UserKnownHostsFile=/dev/null", options)
+
+    def test_the_boolean_this_replaced_is_still_honoured(self):
+        """Connections saved before the policy existed carry the old field."""
+        self.assertIn(
+            "StrictHostKeyChecking=yes",
+            self.datasource(strict_host_key_checking=True)._ssh_options({}),
+        )
+        self.assertIn(
+            "StrictHostKeyChecking=no",
+            self.datasource(strict_host_key_checking=False)._ssh_options({}),
+        )
+
+    def test_an_unknown_policy_falls_back_to_the_safe_default(self):
+        source = self.datasource(host_key_policy="whatever")
+        self.assertIn("StrictHostKeyChecking=accept-new", source._ssh_options({}))
 
 
 class ExecutionTests(SshTestCase):

@@ -56,6 +56,16 @@ class SubjectiveSshDataSource(SubjectiveDataSource):
     AUTH_PASSWORD = "password"
     AUTH_METHODS = (AUTH_AGENT, AUTH_KEY_PATH, AUTH_KEY_CONTENT, AUTH_PASSWORD)
 
+    HOST_KEY_STRICT = "strict"
+    HOST_KEY_ACCEPT_NEW = "accept-new"
+    HOST_KEY_OFF = "off"
+    HOST_KEY_POLICIES = (HOST_KEY_STRICT, HOST_KEY_ACCEPT_NEW, HOST_KEY_OFF)
+    _STRICT_OPTION = {
+        HOST_KEY_STRICT: "yes",
+        HOST_KEY_ACCEPT_NEW: "accept-new",
+        HOST_KEY_OFF: "no",
+    }
+
     # Marks the end of a turn's stdout. Carries the exit code and the shell's working
     # directory after the command ran, which is how `cd` survives into the next turn.
     # Random-free on purpose: it is matched anchored to a line and stripped before the
@@ -104,9 +114,22 @@ class SubjectiveSshDataSource(SubjectiveDataSource):
         self.host_key_fingerprint = str(
             connection.get("host_key_fingerprint") or ""
         ).strip()
-        self.strict_host_key_checking = self._coerce_bool(
-            connection.get("strict_host_key_checking", True)
-        )
+        # How much to trust an unfamiliar host key. Three positions, because the two
+        # the boolean offered are the wrong two: `yes` cannot connect to a machine
+        # this account has never met (and refusing every first connection makes the
+        # feature unusable), while `no` accepts a *changed* key, which is the one
+        # case that actually indicates an attack. `accept-new` takes an unknown key
+        # and pins it, and still refuses a changed one.
+        policy = str(connection.get("host_key_policy") or "").strip()
+        if policy not in self.HOST_KEY_POLICIES:
+            # The boolean this replaced, still honoured for connections that set it.
+            legacy = connection.get("strict_host_key_checking")
+            policy = (
+                self.HOST_KEY_STRICT if self._coerce_bool(legacy)
+                else self.HOST_KEY_OFF if legacy is not None
+                else self.HOST_KEY_ACCEPT_NEW
+            )
+        self.host_key_policy = policy
 
         self.working_directory = str(connection.get("working_directory") or "").strip()
         self.connect_timeout = self._coerce_int(
@@ -232,13 +255,18 @@ class SubjectiveSshDataSource(SubjectiveDataSource):
                     "before every connection and a mismatch aborts the turn."
                 ),
             },
-            "strict_host_key_checking": {
-                "type": "checkbox",
-                "label": "Strict Host Key Checking",
-                "default": True,
+            "host_key_policy": {
+                "type": "select",
+                "label": "Host Key Checking",
+                "required": False,
+                "default": cls.HOST_KEY_ACCEPT_NEW,
+                "options": list(cls.HOST_KEY_POLICIES),
                 "description": (
-                    "Refuse to connect to an unknown or changed host. Turning this off "
-                    "removes the only defence against a man-in-the-middle."
+                    "accept-new: trust a machine's key the first time and refuse it "
+                    "if it ever changes. strict: refuse anything not already in "
+                    "known_hosts, so a new machine must be added there first. "
+                    "off: verify nothing — only for a host you reach over a network "
+                    "you already trust."
                 ),
             },
             "working_directory": {
@@ -654,7 +682,7 @@ class SubjectiveSshDataSource(SubjectiveDataSource):
             # ssh's own stdin is a pty we created rather than a real terminal.
             # Otherwise nothing is interactive here and a tty is only a liability.
             "RequestTTY=force" if pty else "RequestTTY=no",
-            f"StrictHostKeyChecking={'yes' if self.strict_host_key_checking else 'no'}",
+            f"StrictHostKeyChecking={self._STRICT_OPTION[self.host_key_policy]}",
         ]
         if self.username:
             options.append(f"User={self.username}")
@@ -664,7 +692,10 @@ class SubjectiveSshDataSource(SubjectiveDataSource):
         )
         if known_hosts:
             options.append(f"UserKnownHostsFile={known_hosts}")
-        elif not self.strict_host_key_checking:
+        elif self.host_key_policy == self.HOST_KEY_OFF:
+            # Nothing is being verified, so nothing should be recorded either:
+            # writing a key that was never checked would make the next connection
+            # look verified when it is not.
             options.append("UserKnownHostsFile=/dev/null")
 
         if materials.get("askpass"):
